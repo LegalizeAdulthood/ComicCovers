@@ -8,7 +8,7 @@ const request = require('request');
 const _ = require('underscore');
 
 var page = 1;
-var collection = { "url": 'https://my.comics.org/collection/33548', "name": '', "covers": [] };
+var collection = { "url": 'https://my.comics.org/collection/33548/', "name": '', "covers": [] };
 function processPage(html)
 {
     const $ = cheerio.load(html);
@@ -23,6 +23,9 @@ function processPage(html)
     console.log('Page ' + page);
     $('div .thumbnail').each(function(index, elem) {
         var url = $(this).find('img')[0].attribs['src'];
+        if (/noupload/.test(url))
+            return;
+           
         url = /^(.*)\?/.exec(url)[1].replace('/w100', '/w400');
         var pieces = /^(.*[^\s])\s\(.*\) #([0-9]+)/.exec($(this).find('div .caption').text());
         var name = (pieces[1] + ' #' + pieces[2]).replace(/ /g, '').replace(/The/g, '').replace(/[\?:]/g, '');
@@ -34,7 +37,7 @@ function processPage(html)
 
 function fetchPage(page, next)
 {
-    request(collection.url + '/?page=' + page, function(err, res, html) {
+    request(collection.url + '?page=' + page, function(err, res, html) {
         if (err) {
             next(err);
             return;
@@ -63,6 +66,14 @@ function processCollection()
     });
 }
 
-fetchPage(page, function() {
-    processCollection();
-});
+function main()
+{
+    if (process.argv.length === 3) {
+        collection.url = process.argv[2];
+    }
+    fetchPage(page, function() {
+        processCollection();
+    });
+}
+
+main();

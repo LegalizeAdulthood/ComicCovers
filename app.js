@@ -27,8 +27,16 @@ function processPage(html)
             return;
            
         url = /^(.*)\?/.exec(url)[1].replace('/w100', '/w400');
-        var pieces = /^(.*[^\s])\s\(.* ([0-9]+) series\) #([0-9]+)/.exec($(this).find('div .caption').text());
-        var name = (pieces[1] + '(' + pieces[2] + ')#' + pieces[3]).replace(/ /g, '').replace(/The/g, '').replace(/[?:]/g, '');
+        var issueName = $(this).find('div .caption').text();
+        var pieces = /^(.*[^\s])\s\(.* ([0-9]+) series\) #([0-9]+)/.exec(issueName);
+        var name;
+        if (pieces !== null) {
+            name = pieces[1] + '(' + pieces[2] + ')#' + pieces[3];
+        } else {
+            pieces = /^(.*[^\s])\s\(.* ([0-9]+) series\)/.exec(issueName);
+            name = pieces[1] + '(' + pieces[2] + ')';
+        }
+        name = name.replace(/ /g, '').replace(/The/g, '').replace(/[?:/'";&*$^{}[\]|\\<>]/g, '');
         collection.covers.push([name, url]);
     });
     ++page;

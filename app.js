@@ -8,17 +8,32 @@ const process = require('process');
 const request = require('request');
 const _ = require('underscore');
 
+function syncDirectory(collection, next)
+{
+    fs.readdir(collection.name, function(err, files) {
+        if (err) { return next(err); }
+
+        async.eachLimit(files, 5, function(file, nextFile) {
+            if (!_.find(collection.covers, function(cover) { return cover[0] === file; })) {
+                console.log('Removing cover ' + file + ' not in collection ' + collection.name);
+                fs.unlink(path.join(collection.name, file), nextFile);
+                return;
+            }
+            nextFile();
+        }, next);
+    });
+}
+
 function fetchCover(collection, cover, next)
 {
     var url = cover[1];
-    var filename = path.join(collection.name, cover[0] + '.jpg');
+    var filename = path.join(collection.name, cover[0]);
     fs.access(filename, fs.constants.F_OK, function(err) {
         if (err) {
             // file does not (yet) exist
             console.log('Fetch ' + url + ' as ' + filename);
             request(url, next).pipe(fs.createWriteStream(filename));
         } else {
-            console.log('Skipping ' + filename);
             next();
         }
     });
@@ -38,7 +53,11 @@ function processCollection(collection, next)
             return;
         }
 
-        async.eachLimit(collection.covers, 5, function(cover, nextCover) { fetchCover(collection, cover, nextCover); }, next);
+        async.eachLimit(collection.covers, 5, function(cover, nextCover) { fetchCover(collection, cover, nextCover); }, function(err) {
+            if (err) { return next(err); }
+
+            syncDirectory(collection, next);
+        });
     });
 }
 
@@ -53,7 +72,6 @@ function processPage(collection, page, html)
         collection.name = /Collection details: *(.*[^\s])\s+\//.exec($('h1').text())[1].replace(/[?:]/g, '');
         console.log('Collection: ' + collection.name);
     }
-    console.log(collection.name + ' Page ' + page);
     $('div .thumbnail').each(function(index, elem) {
         var url = $(this).find('img')[0].attribs['src'];
         if (/noupload/.test(url))
@@ -72,7 +90,7 @@ function processPage(collection, page, html)
             name = pieces[1] + '(' + pieces[2] + ')';
         }
         name = name.replace(/ /g, '').replace(/The/g, '').replace(/[?:/'";&*$^{}[\]|\\<>]/g, '');
-        collection.covers.push([name, url]);
+        collection.covers.push([name + '.jpg', url]);
     });
     ++page;
     return true;

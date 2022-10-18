@@ -2,3 +2,6 @@
 bin
 obj
 node_modules
+pictures
+*.bat
+urls.txt

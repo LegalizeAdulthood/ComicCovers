@@ -15,7 +15,7 @@ function syncDirectory(collection, next)
 
         async.eachLimit(files, 5, function(file, nextFile) {
             if (!_.find(collection.covers, function(cover) { return cover[0] === file; })) {
-                console.log('Removing cover ' + file + ' not in collection ' + collection.name);
+                collection.removed.push(file);
                 fs.unlink(path.join(collection.name, file), nextFile);
                 return;
             }
@@ -31,7 +31,7 @@ function fetchCover(collection, cover, next)
     fs.access(filename, fs.constants.F_OK, function(err) {
         if (err) {
             // file does not (yet) exist
-            console.log('Fetch ' + url + ' as ' + filename);
+            collection.added.push(cover[0]);
             request(url, next).pipe(fs.createWriteStream(filename));
         } else {
             next();
@@ -110,14 +110,17 @@ function fetchPage(collection, page, next)
     });
 }
 
-function fetchCollection(url, next)
+function fetchCollection(collections, url, next)
 {
     var page = 1;
-    var collection = { url: url, name: '', covers: [] };
+    var collection = { url: url, name: '', covers: [], added: [], removed: [] };
     fetchPage(collection, page, function(err) {
         if (err) { next(err); return; }
 
-        processCollection(collection, next);
+        processCollection(collection, function(err) {
+            collections.push(collection);
+            next(err);
+        });
     });
 }
 
@@ -134,7 +137,23 @@ function main()
 
         data = data.trim().replace(/\r/g, '');
         var urls = data.split("\n");
-        async.eachLimit(urls, 10, fetchCollection);
+        var collections = [];
+        async.eachLimit(urls, 10, function(url, next) {
+            fetchCollection(collections, url, next);
+        }, function() {
+            _.each(collections, function(collection) {
+                if (collection.added.length) {
+                    _.each(collection.added, function(file) {
+                        console.log(collection.name + ' added ' + file);
+                    });
+                }
+                if (collection.removed.length) {
+                    _.each(collection.removed, function(file) {
+                        console.log(collection.name + ' removed ' + file);
+                    });
+                }
+            });
+        });
     });
 }
 

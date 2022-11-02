@@ -13,13 +13,24 @@ function syncDirectory(collection, next)
     fs.readdir(collection.name, function(err, files) {
         if (err) { return next(err); }
 
-        async.eachLimit(files, 5, function(file, nextFile) {
+        async.eachLimit(files, 20, function(file, nextFile) {
+            var fullPath = path.join(collection.name, file);
             if (!_.find(collection.covers, function(cover) { return cover[0] === file; })) {
                 collection.removed.push(file);
-                fs.unlink(path.join(collection.name, file), nextFile);
+                fs.unlink(fullPath, nextFile);
                 return;
             }
-            nextFile();
+            fs.stat(fullPath, function(err, stats) {
+                if (err) {
+                    nextFile(err); return;
+                }
+                if (stats.size === 0) {
+                    collection.zero.push(file);
+                    fs.unlink(fullPath, nextFile);
+                    return;
+                }
+                nextFile();
+            });
         }, next);
     });
 }
@@ -53,10 +64,10 @@ function processCollection(collection, next)
             return;
         }
 
-        async.eachLimit(collection.covers, 5, function(cover, nextCover) { fetchCover(collection, cover, nextCover); }, function(err) {
+        syncDirectory(collection, function(err) {
             if (err) { return next(err); }
 
-            syncDirectory(collection, next);
+            async.eachLimit(collection.covers, 5, function(cover, nextCover) { fetchCover(collection, cover, nextCover); }, next);
         });
     });
 }
@@ -113,7 +124,7 @@ function fetchPage(collection, page, next)
 function fetchCollection(collections, url, next)
 {
     var page = 1;
-    var collection = { url: url, name: '', covers: [], added: [], removed: [] };
+    var collection = { url: url, name: '', covers: [], added: [], removed: [], zero: [] };
     fetchPage(collection, page, function(err) {
         if (err) { next(err); return; }
 
@@ -122,6 +133,24 @@ function fetchCollection(collections, url, next)
             next(err);
         });
     });
+}
+
+function coverSortKey(file)
+{
+    var leftParen = file.indexOf('(');
+    var rightParen = file.indexOf(')');
+    var hash = file.indexOf('#');
+    var dot = file.lastIndexOf('.');
+    return file.substr(0, leftParen) + '.' + file.substr(leftParen + 1, rightParen - leftParen - 1) + '.' +
+        String(1000 + Number(file.substr(hash + 1, dot - hash - 1))).substr(1);
+}
+
+function printCollection(collection, covers, prefix)
+{
+    if (covers.length) {
+        console.log(collection + ' ' + prefix + ':');
+        _.each(_.sortBy(covers, coverSortKey), function(name) { console.log(name); });
+    }
 }
 
 function main()
@@ -138,20 +167,13 @@ function main()
         data = data.trim().replace(/\r/g, '');
         var urls = data.split("\n");
         var collections = [];
-        async.eachLimit(urls, 10, function(url, next) {
+        async.eachLimit(urls, 5, function(url, next) {
             fetchCollection(collections, url, next);
         }, function() {
             _.each(collections, function(collection) {
-                if (collection.added.length) {
-                    _.each(collection.added, function(file) {
-                        console.log(collection.name + ' added ' + file);
-                    });
-                }
-                if (collection.removed.length) {
-                    _.each(collection.removed, function(file) {
-                        console.log(collection.name + ' removed ' + file);
-                    });
-                }
+                printCollection(collection.name, collection.added, 'added');
+                printCollection(collection.name, collection.removed, 'removed');
+                printCollection(collection.name, collection.zero, 'removed zero-length');
             });
         });
     });

@@ -174,6 +174,9 @@ function main()
                 printCollection(collection.name, collection.added, 'added');
                 printCollection(collection.name, collection.removed, 'removed');
                 printCollection(collection.name, collection.zero, 'removed zero-length');
+                if (collection.added.length + collection.removed.length + collection.zero.length) {
+                    console.log('');
+                }
             });
         });
     });

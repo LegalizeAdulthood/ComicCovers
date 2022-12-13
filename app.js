@@ -92,7 +92,7 @@ function processPage(collection, page, html)
             'https://files1.comics.org/static/img/nocover_large.png' :
             /^(.*)\?/.exec(url)[1].replace('/w100', '/w400');
         var issueName = $(this).find('div .caption').text();
-        var pieces = /^(.*[^\s])\s\(.* ([0-9]+) series\) #([0-9]+)/.exec(issueName);
+        var pieces = /^(.*[^\s])\s\(.* ([0-9]+) series\) #([-0-9]+)/.exec(issueName);
         var name;
         if (pieces !== null) {
             name = pieces[1] + '(' + pieces[2] + ')#' + pieces[3];

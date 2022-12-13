@@ -164,11 +164,10 @@ function main()
     fs.readFile(urlFile, { encoding: 'utf8' }, function(err, data) {
         if (err) { console.log("Err: " + err); return err; }
 
-        data = data.trim().replace(/\r/g, '');
-        var urls = data.split("\n");
+        var urls = JSON.parse(data);
         var collections = [];
         async.eachLimit(urls, 5, function(url, next) {
-            fetchCollection(collections, url, next);
+            fetchCollection(collections, url.url, next);
         }, function() {
             _.each(collections, function(collection) {
                 printCollection(collection.name, collection.added, 'added');

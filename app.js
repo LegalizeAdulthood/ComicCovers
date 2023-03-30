@@ -53,7 +53,7 @@ function fetchCover(collection, cover, next)
 function processCollection(collection, next)
 {
     if (collection.name === '') {
-        console.log(JSON.stringify(collection, null, 4));
+        console.log("Empty name for collection\n" + JSON.stringify(collection, null, 4));
         next(collection);
         return;
     }
@@ -75,7 +75,10 @@ function processCollection(collection, next)
 function processPage(collection, page, html)
 {
     const $ = cheerio.load(html);
-    var pageNum = parseInt($($('ul.pagination li.active')[0]).text());
+    var activeListItems = $('ul.pagination li.active');
+    var pageNum = 1;
+    if (activeListItems.length > 0)
+        pageNum = parseInt($(activeListItems[0]).text());
     if (page !== pageNum)
         return false;
 

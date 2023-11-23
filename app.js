@@ -83,7 +83,13 @@ function processPage(collection, page, html)
         return false;
 
     if (collection.name.length === 0) {
-        collection.name = /Collection details: *(.*[^\s])\s+\//.exec($('h1').text())[1].replace(/[?:]/g, '');
+        var h1 = $('h1');
+        if (h1.length === 0) {
+            console.log('Malformed collection ' + collection.url + '; cloudflare challenge?');
+            return false;
+        }
+        var tmp = /Collection details: *(.*[^\s])\s+\//.exec(h1.text());
+        collection.name = tmp[1].replace(/[?:]/g, '');
         console.log('Collection: ' + collection.name);
     }
     $('div .thumbnail').each(function(index, elem) {

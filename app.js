@@ -123,10 +123,14 @@ function fetchPage(collection, page, next)
             next(err);
             return;
         }
-        if (processPage(collection, page, html))
-            fetchPage(collection, ++page, next);
-        else
+        if (res.statusCode !== 200) {
+            console.log(collection.url + ' ' + res.statusCode);
             next();
+        } else if (processPage(collection, page, html)) {
+            fetchPage(collection, ++page, next);
+        } else {
+            next();
+        }
     });
 }
 

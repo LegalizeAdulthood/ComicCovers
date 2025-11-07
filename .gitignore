@@ -5,3 +5,4 @@ node_modules
 pictures
 *.bat
 urls.txt
+*.user

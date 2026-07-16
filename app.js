@@ -11,39 +11,280 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 
 puppeteer.use(StealthPlugin());
 
+const BROWSER_EXE = findBrowserExecutable();
 let browser = null;
+let scrapePage = null;
+const BROWSER_PROFILE_DIR = process.env.COMIC_COVERS_BROWSER_PROFILE || path.join(__dirname, defaultBrowserProfileName(BROWSER_EXE));
+const CLOUDFLARE_TIMEOUT_MS = readPositiveInt(process.env.COMIC_COVERS_CLOUDFLARE_TIMEOUT_MS, 180000);
+const COLLECTION_CONCURRENCY = readPositiveInt(process.env.COMIC_COVERS_COLLECTION_CONCURRENCY, 1);
+const COVER_CONCURRENCY = readPositiveInt(process.env.COMIC_COVERS_COVER_CONCURRENCY, 1);
+const NAVIGATION_TIMEOUT_MS = readPositiveInt(process.env.COMIC_COVERS_NAVIGATION_TIMEOUT_MS, 90000);
+const REQUEST_DELAY_MS = readPositiveInt(process.env.COMIC_COVERS_REQUEST_DELAY_MS, 1500);
+const HEADLESS = /^(1|true|yes)$/i.test(process.env.COMIC_COVERS_HEADLESS || '');
+const WARM_UP_CLOUDFLARE = /^(1|true|yes)$/i.test(process.env.COMIC_COVERS_WARM_UP || '');
+let nextBrowserOperation = Promise.resolve();
+
+function readPositiveInt(value, defaultValue)
+{
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > 0) {
+        return parsed;
+    }
+    return defaultValue;
+}
+
+function sleep(ms)
+{
+    return new Promise(function(resolve) { setTimeout(resolve, ms); });
+}
+
+function envValue(name)
+{
+    return process.env[name] || process.env[name.toUpperCase()] || process.env[name.toLowerCase()];
+}
+
+function addBrowserCandidate(candidates, base, relativePath)
+{
+    if (base) {
+        candidates.push(path.join(base, relativePath));
+    }
+}
+
+function findBrowserExecutable()
+{
+    const configured = process.env.COMIC_COVERS_BROWSER_EXE;
+    if (configured) {
+        if (!fs.existsSync(configured)) {
+            throw new Error('COMIC_COVERS_BROWSER_EXE does not exist: ' + configured);
+        }
+        return configured;
+    }
+
+    const candidates = [];
+    addBrowserCandidate(candidates, envValue('ProgramFiles'), 'BraveSoftware\\Brave-Browser\\Application\\brave.exe');
+    addBrowserCandidate(candidates, envValue('ProgramFiles(x86)'), 'BraveSoftware\\Brave-Browser\\Application\\brave.exe');
+    addBrowserCandidate(candidates, envValue('LocalAppData'), 'BraveSoftware\\Brave-Browser\\Application\\brave.exe');
+    addBrowserCandidate(candidates, envValue('ProgramFiles'), 'Google\\Chrome\\Application\\chrome.exe');
+    addBrowserCandidate(candidates, envValue('ProgramFiles(x86)'), 'Google\\Chrome\\Application\\chrome.exe');
+    addBrowserCandidate(candidates, envValue('LocalAppData'), 'Google\\Chrome\\Application\\chrome.exe');
+
+    for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) {
+            return candidate;
+        }
+    }
+
+    return puppeteer.executablePath();
+}
+
+function defaultBrowserProfileName(browserExe)
+{
+    if (/brave\.exe$/i.test(browserExe || '')) {
+        return '.browser-profile-brave';
+    }
+    return '.browser-profile';
+}
+
+async function withScrapePage(operation)
+{
+    const previousOperation = nextBrowserOperation;
+    let release;
+    nextBrowserOperation = new Promise(function(resolve) { release = resolve; });
+    await previousOperation;
+
+    try {
+        const page = await getScrapePage();
+        await sleep(REQUEST_DELAY_MS);
+        return await operation(page);
+    } finally {
+        release();
+    }
+}
 
 async function getBrowser()
 {
     if (!browser) {
         browser = await puppeteer.launch({
-            headless: 'new',
+            executablePath: BROWSER_EXE,
+            headless: HEADLESS ? 'new' : false,
+            userDataDir: BROWSER_PROFILE_DIR,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-accelerated-2d-canvas',
-                '--disable-gpu'
+                '--disable-gpu',
+                '--window-size=1366,900'
             ]
         });
+        console.log('Browser executable: ' + BROWSER_EXE);
+        console.log('Browser profile: ' + BROWSER_PROFILE_DIR);
+        if (!HEADLESS) {
+            console.log('If Cloudflare asks, complete the check in the Chromium window. The clearance will be reused.');
+        }
     }
     return browser;
 }
 
-async function getPage()
+async function configurePage(page)
+{
+    page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
+    page.setDefaultTimeout(NAVIGATION_TIMEOUT_MS);
+
+    await page.setViewport({ width: 1366, height: 900 });
+
+    await page.setExtraHTTPHeaders({
+        'Accept-Language': 'en-US,en;q=0.9'
+    });
+}
+
+async function newConfiguredPage()
 {
     const browser = await getBrowser();
     const page = await browser.newPage();
 
-    // Set a realistic viewport
-    await page.setViewport({ width: 1920, height: 1080 });
-
-    // Set additional headers
-    await page.setExtraHTTPHeaders({
-        'Accept-Language': 'en-US,en;q=0.9'
-    });
+    await configurePage(page);
 
     return page;
+}
+
+async function getScrapePage()
+{
+    if (!scrapePage || scrapePage.isClosed()) {
+        scrapePage = await newConfiguredPage();
+    }
+    return scrapePage;
+}
+
+function isCloudflareChallenge(html)
+{
+    if (!html) {
+        return false;
+    }
+    if (isCollectionPage(html)) {
+        return false;
+    }
+
+    const $ = cheerio.load(html);
+    const title = $('title').text().trim().toLowerCase();
+    const bodyText = $('body').text().replace(/\s+/g, ' ').trim().toLowerCase();
+    const lowerHtml = html.toLowerCase();
+
+    return title === 'just a moment...' ||
+        (title.indexOf('attention required') !== -1 && title.indexOf('cloudflare') !== -1) ||
+        bodyText.indexOf('checking if the site connection is secure') !== -1 ||
+        bodyText.indexOf('review the security of your connection') !== -1 ||
+        (bodyText.indexOf('verify you are human') !== -1 && bodyText.indexOf('cloudflare') !== -1) ||
+        (bodyText.indexOf('enable javascript and cookies to continue') !== -1 && bodyText.indexOf('cloudflare') !== -1) ||
+        (lowerHtml.indexOf('cf-turnstile') !== -1 && bodyText.indexOf('verify') !== -1 && bodyText.indexOf('cloudflare') !== -1);
+}
+
+function isCollectionPage(html)
+{
+    const $ = cheerio.load(html || '');
+    const h1Text = $('h1').text();
+    return /Collection Details:/i.test(h1Text) || $('div .thumbnail img').length > 0;
+}
+
+function isLoginPage(page, html)
+{
+    const currentUrl = page.url();
+    const lowerHtml = (html || '').toLowerCase();
+    return /\/accounts\/login\/|\/login\//i.test(currentUrl) ||
+        lowerHtml.indexOf('name="username"') !== -1 && lowerHtml.indexOf('name="password"') !== -1 ||
+        lowerHtml.indexOf('sign in') !== -1 && lowerHtml.indexOf('password') !== -1;
+}
+
+async function getPageContent(page)
+{
+    for (let attempt = 0; attempt < 3; ++attempt) {
+        try {
+            return await page.content();
+        } catch (err) {
+            await sleep(1000);
+        }
+    }
+    return await page.content();
+}
+
+async function hasCloudflareClearance(page, url)
+{
+    try {
+        const cookies = await page.cookies(url);
+        return _.some(cookies, function(cookie)
+        {
+            return cookie.name === 'cf_clearance';
+        });
+    } catch (err) {
+        return false;
+    }
+}
+
+async function waitForReadablePage(page, url)
+{
+    await page.waitForNetworkIdle({ idleTime: 500, timeout: 10000 }).catch(function() {});
+    const html = await getPageContent(page);
+    if (isLoginPage(page, html)) {
+        throw new Error('Collection page redirected to login after Cloudflare: ' + page.url());
+    }
+    if (isCloudflareChallenge(html)) {
+        return null;
+    }
+    return html;
+}
+
+async function waitForCloudflare(page, url)
+{
+    let html = await getPageContent(page);
+    if (!isCloudflareChallenge(html)) {
+        if (isLoginPage(page, html)) {
+            throw new Error('Collection page redirected to login: ' + page.url());
+        }
+        return { html: html, challenged: false };
+    }
+
+    if (HEADLESS) {
+        throw new Error('Cloudflare challenge detected for ' + url +
+            '. Run without COMIC_COVERS_HEADLESS so the browser window can complete the check once.');
+    }
+
+    console.log('Cloudflare challenge for ' + url);
+    console.log('Waiting up to ' + Math.ceil(CLOUDFLARE_TIMEOUT_MS / 1000) + ' seconds for the browser to clear it...');
+    await page.bringToFront().catch(function() {});
+
+    const deadline = Date.now() + CLOUDFLARE_TIMEOUT_MS;
+    let lastProgressSeconds = 0;
+    while (Date.now() < deadline) {
+        await sleep(2000);
+
+        const waitedSeconds = Math.floor((CLOUDFLARE_TIMEOUT_MS - (deadline - Date.now())) / 1000);
+        if (waitedSeconds - lastProgressSeconds >= 15) {
+            lastProgressSeconds = waitedSeconds;
+            console.log('Still waiting for Cloudflare clearance for ' + url + ' (' + waitedSeconds + 's)');
+        }
+
+        if (await hasCloudflareClearance(page, url)) {
+            console.log('Cloudflare clearance cookie found; reloading requested page...');
+            await page.goto(url, {
+                waitUntil: 'domcontentloaded',
+                timeout: NAVIGATION_TIMEOUT_MS
+            });
+            html = await waitForReadablePage(page, url);
+            if (html) {
+                return { html: html, challenged: true };
+            }
+        }
+
+        html = await getPageContent(page);
+        if (!isCloudflareChallenge(html)) {
+            html = await waitForReadablePage(page, url);
+            if (html) {
+                return { html: html, challenged: true };
+            }
+        }
+    }
+
+    throw new Error('Timed out waiting for Cloudflare challenge to clear for ' + url);
 }
 
 function syncDirectory(collection, next)
@@ -78,41 +319,48 @@ function syncDirectory(collection, next)
 
 async function fetchWithPuppeteer(url)
 {
-    const page = await getPage();
-
     try {
-        await page.goto(url, {
-            waitUntil: 'networkidle0',
-            timeout: 60000
+        return await withScrapePage(async function(page)
+        {
+            await page.goto(url, {
+                waitUntil: 'domcontentloaded',
+                timeout: NAVIGATION_TIMEOUT_MS
+            });
+
+            const result = await waitForCloudflare(page, url);
+            return result.html;
         });
-
-        // Wait a bit for any dynamic content
-        // await page.waitForTimeout(1000);
-
-        const html = await page.content();
-        await page.close();
-        return html;
     } catch (err) {
         console.error('Error fetching', url, ':', err.message);
-        await page.close();
         throw err;
     }
 }
 
 async function downloadWithPuppeteer(url)
 {
-    const page = await getPage();
-
     try {
-        const response = await page.goto(url, {
-            waitUntil: 'networkidle0',
-            timeout: 60000
+        return await withScrapePage(async function(page)
+        {
+            let response = await page.goto(url, {
+                waitUntil: 'domcontentloaded',
+                timeout: NAVIGATION_TIMEOUT_MS
+            });
+            const result = await waitForCloudflare(page, url);
+            if (result.challenged || !response || !/^image\//i.test(response.headers()['content-type'] || '')) {
+                response = await page.goto(url, {
+                    waitUntil: 'networkidle2',
+                    timeout: NAVIGATION_TIMEOUT_MS
+                });
+            }
+
+            const contentType = response ? response.headers()['content-type'] || '' : '';
+            if (!/^image\//i.test(contentType)) {
+                throw new Error('Expected image from ' + url + ', got ' + (contentType || 'no content type'));
+            }
+
+            return await response.buffer();
         });
-        const buffer = await response.buffer();
-        await page.close();
-        return buffer;
     } catch (err) {
-        await page.close();
         throw err;
     }
 }
@@ -141,8 +389,9 @@ function fetchCover(collection, cover, next)
 function processCollection(collection, next)
 {
     if (collection.name === '') {
-        console.log("Empty name for collection\n" + JSON.stringify(collection, null, 4));
-        next(collection);
+        var err = new Error("Empty name for collection\n" + JSON.stringify(collection, null, 4));
+        console.log(err.message);
+        next(err);
         return;
     }
     fs.mkdir(collection.name, function(err)
@@ -157,7 +406,7 @@ function processCollection(collection, next)
         {
             if (err) { return next(err); }
 
-            async.eachLimit(collection.covers, 5, function(cover, nextCover)
+            async.eachLimit(collection.covers, COVER_CONCURRENCY, function(cover, nextCover)
             {
                 fetchCover(collection, cover, nextCover);
             }, next);
@@ -239,7 +488,7 @@ function processPage(collection, page, html)
 
 function fetchPage(collection, page, next)
 {
-    fetchWithPuppeteer(collection.url + '?page=' + page)
+    fetchWithPuppeteer(collectionPageUrl(collection.url, page))
         .then(function(html)
         {
             if (processPage(collection, page, html)) {
@@ -251,7 +500,7 @@ function fetchPage(collection, page, next)
         .catch(function(err)
         {
             console.log(collection.url + ' error: ' + err.message);
-            next();
+            next(err);
         });
 }
 
@@ -269,6 +518,25 @@ function fetchCollection(collections, url, next)
             next(err);
         });
     });
+}
+
+function collectionPageUrl(collectionUrl, page)
+{
+    const url = new URL(collectionUrl);
+    url.searchParams.set('page', String(page));
+    return url.href;
+}
+
+async function warmUpCloudflare(urls)
+{
+    const first = _.find(urls, function(url) { return url && url.url; });
+    if (!first) {
+        return;
+    }
+
+    const url = collectionPageUrl(first.url, 1);
+    console.log('Checking browser clearance for ' + url);
+    await fetchWithPuppeteer(url);
 }
 
 function coverSortKey(file)
@@ -297,17 +565,34 @@ async function main()
     }
 
     var urlFile = process.argv[2];
-    fs.readFile(urlFile, { encoding: 'utf8' }, function(err, data)
+    fs.readFile(urlFile, { encoding: 'utf8' }, async function(err, data)
     {
         if (err) { console.log("Err: " + err); return err; }
 
         var urls = JSON.parse(data);
         var collections = [];
-        async.eachLimit(urls, 10, function(url, next)
+
+        if (WARM_UP_CLOUDFLARE) {
+            try {
+                await warmUpCloudflare(urls);
+            } catch (err) {
+                console.log('ERROR: ' + (err.message || err));
+                if (browser) {
+                    await browser.close();
+                }
+                process.exit(1);
+                return;
+            }
+        }
+
+        async.eachLimit(urls, COLLECTION_CONCURRENCY, function(url, next)
         {
             fetchCollection(collections, url.url, next);
-        }, async function()
+        }, async function(err)
         {
+            if (err) {
+                console.log('ERROR: ' + (err.message || err));
+            }
             _.each(collections, function(collection)
             {
                 printCollection(collection.name, collection.added, 'added');
@@ -322,7 +607,7 @@ async function main()
             if (browser) {
                 await browser.close();
             }
-            process.exit(0);
+            process.exit(err ? 1 : 0);
         });
     });
 }

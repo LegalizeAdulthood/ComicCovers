@@ -1,4 +1,6 @@
 .vs
+.browser-profile/
+.browser-profile-brave/
 bin
 obj
 node_modules

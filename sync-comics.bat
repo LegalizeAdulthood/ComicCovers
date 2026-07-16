@@ -13,7 +13,7 @@ REM - Never deletes local files
 
 REM Configuration
 set PHONE_NAME=rakshasa
-set LOCAL_PATH=D:\src\legalize\ComicCovers\pictures
+set "LOCAL_PATH=%~dp0pictures"
 
 echo ============================================
 echo Comic Cover Synchronization (.jpg only)

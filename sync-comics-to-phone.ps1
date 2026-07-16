@@ -2,8 +2,8 @@
 # Synchronizes a local directory to the DCIM\Comics folder on an Android phone via MTP
 
 param(
-    [Parameter(Mandatory=$true)]
-    [string]$LocalPath,
+    [Parameter(Mandatory=$false)]
+    [string]$LocalPath = (Join-Path $PSScriptRoot "pictures"),
     
     [Parameter(Mandatory=$true)]
     [string]$PhoneName,

@@ -289,13 +289,13 @@ async function waitForCloudflare(page, url)
 
 function syncDirectory(collection, next)
 {
-    fs.readdir(collection.name, function(err, files)
+    fs.readdir(collection.dir, function(err, files)
     {
         if (err) { return next(err); }
 
         async.eachLimit(files, 20, function(file, nextFile)
         {
-            var fullPath = path.join(collection.name, file);
+            var fullPath = path.join(collection.dir, file);
             if (!_.find(collection.covers, function(cover) { return cover[0] === file; })) {
                 collection.removed.push(file);
                 fs.unlink(fullPath, nextFile);
@@ -368,7 +368,7 @@ async function downloadWithPuppeteer(url)
 function fetchCover(collection, cover, next)
 {
     var url = cover[1];
-    var filename = path.join(collection.name, cover[0]);
+    var filename = path.join(collection.dir, cover[0]);
     fs.access(filename, fs.constants.F_OK, function(err)
     {
         if (err) {
@@ -394,7 +394,7 @@ function processCollection(collection, next)
         next(err);
         return;
     }
-    fs.mkdir(collection.name, function(err)
+    fs.mkdir(collection.dir, function(err)
     {
         if (err && err.code !== 'EEXIST') {
             console.log(collection.name + ' mkdir: ' + err);
@@ -424,20 +424,25 @@ function processPage(collection, page, html)
     if (page !== pageNum)
         return false;
 
-    if (collection.name.length === 0) {
+    if (collection.remoteName.length === 0) {
         var h1 = $('h1');
         if (h1.length === 0) {
             console.log('Malformed collection ' + collection.url + '; no h1 found');
             return false;
         }
-        var h1Text = h1.text().trim();
 
+        var h1Text = h1.text().trim();
         var tmp = /Collection Details:\s*(.+?)(?:\s*\/|$)/s.exec(h1Text);
         if (!tmp) {
             console.log('ERROR: Could not parse collection name from H1:', h1Text);
             return false;
         }
-        collection.name = tmp[1].trim().replace(/[?:]/g, '');
+
+        collection.remoteName = tmp[1].trim().replace(/[?:]/g, '');
+        if (collection.name.length === 0) {
+            collection.name = collection.remoteName;
+            collection.dir = path.join(collection.baseDir, collection.name);
+        }
         console.log('Collection: ' + collection.name);
     }
 
@@ -504,10 +509,23 @@ function fetchPage(collection, page, next)
         });
 }
 
-function fetchCollection(collections, url, next)
+function fetchCollection(collections, entry, baseDir, next)
 {
     var page = 1;
-    var collection = { url: url, name: '', covers: [], added: [], removed: [], zero: [] };
+    var collection = {
+        url: entry.url,
+        name: (entry.name || '').replace(/[?:]/g, ''),
+        remoteName: '',
+        baseDir: baseDir,
+        dir: '',
+        covers: [],
+        added: [],
+        removed: [],
+        zero: []
+    };
+    if (collection.name.length > 0) {
+        collection.dir = path.join(collection.baseDir, collection.name);
+    }
     fetchPage(collection, page, function(err)
     {
         if (err) { next(err); return; }
@@ -516,6 +534,99 @@ function fetchCollection(collections, url, next)
         {
             collections.push(collection);
             next(err);
+        });
+    });
+}
+
+function configuredCollectionNames(urls, collections)
+{
+    var names = _.map(urls, function(entry)
+    {
+        return (entry.name || '').replace(/[?:]/g, '');
+    });
+
+    names = names.concat(_.map(collections, function(collection)
+    {
+        return collection.name || '';
+    }));
+
+    return new Set(names.filter(function(name)
+    {
+        return name.length > 0;
+    }));
+}
+
+function pruneUnlistedCollections(urls, baseDir, collections, next)
+{
+    var configuredNames = configuredCollectionNames(urls, collections);
+    fs.readdir(baseDir, { withFileTypes: true }, function(err, entries)
+    {
+        if (err) { return next(err); }
+
+        async.eachLimit(entries, 5, function(entry, nextEntry)
+        {
+            if (!entry.isDirectory() || configuredNames.has(entry.name)) {
+                nextEntry();
+                return;
+            }
+
+            pruneUnlistedCollection(baseDir, entry.name, collections, nextEntry);
+        }, next);
+    });
+}
+
+function pruneUnlistedCollection(baseDir, name, collections, next)
+{
+    var dir = path.join(baseDir, name);
+    fs.readdir(dir, function(err, files)
+    {
+        if (err) { return next(err); }
+
+        var collection = {
+            url: '',
+            name: name,
+            remoteName: '',
+            baseDir: baseDir,
+            dir: dir,
+            covers: [],
+            added: [],
+            removed: [],
+            zero: []
+        };
+
+        async.eachLimit(files, 20, function(file, nextFile)
+        {
+            if (!/\.jpg$/i.test(file)) {
+                nextFile();
+                return;
+            }
+
+            fs.unlink(path.join(dir, file), function(err)
+            {
+                if (!err) {
+                    collection.removed.push(file);
+                }
+                nextFile(err);
+            });
+        }, function(err)
+        {
+            if (err) { return next(err); }
+
+            if (collection.removed.length === 0) {
+                next();
+                return;
+            }
+
+            fs.rmdir(dir, function(err)
+            {
+                if (err && err.code !== 'ENOTEMPTY') {
+                    next(err);
+                    return;
+                }
+
+                collections.push(collection);
+                next();
+            });
         });
     });
 }
@@ -570,6 +681,7 @@ async function main()
         if (err) { console.log("Err: " + err); return err; }
 
         var urls = JSON.parse(data);
+        var baseDir = path.dirname(path.resolve(urlFile));
         var collections = [];
 
         if (WARM_UP_CLOUDFLARE) {
@@ -587,11 +699,28 @@ async function main()
 
         async.eachLimit(urls, COLLECTION_CONCURRENCY, function(url, next)
         {
-            fetchCollection(collections, url.url, next);
+            fetchCollection(collections, url, baseDir, next);
         }, async function(err)
         {
             if (err) {
                 console.log('ERROR: ' + (err.message || err));
+            } else {
+                try {
+                    await new Promise(function(resolve, reject)
+                    {
+                        pruneUnlistedCollections(urls, baseDir, collections, function(err)
+                        {
+                            if (err) {
+                                reject(err);
+                            } else {
+                                resolve();
+                            }
+                        });
+                    });
+                } catch (pruneErr) {
+                    err = pruneErr;
+                    console.log('ERROR: ' + (err.message || err));
+                }
             }
             _.each(collections, function(collection)
             {
